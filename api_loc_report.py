@@ -16,6 +16,8 @@ Usage:
 
     python api_loc_report.py --root . --out api_loc_report.xlsx
 
+    python api_loc_report.py --root1 old_workspace --root2 new_workspace --out api_loc_comparison.xlsx
+
 Install dependency if needed:
 
     python -m pip install openpyxl
@@ -72,6 +74,13 @@ class ApiLoc:
     api: str
     start_line: int
     end_line: int
+    loc: int
+
+
+@dataclass(frozen=True)
+class ScopeTotals:
+    files: int
+    apis: int
     loc: int
 
 
@@ -349,33 +358,66 @@ def collect_api_locs(root: Path) -> list[ApiLoc]:
     return sorted(rows, key=lambda row: (row.module, row.file, row.start_line, row.api))
 
 
-def write_excel(rows: list[ApiLoc], out_path: Path) -> None:
+def load_openpyxl():
     try:
-        from openpyxl import Workbook
-        from openpyxl.styles import Alignment, Font, PatternFill
-        from openpyxl.worksheet.table import Table, TableStyleInfo
+        import openpyxl
     except ImportError as exc:
         raise SystemExit(
             "Missing dependency: openpyxl\n"
             "Install it with: python -m pip install openpyxl"
         ) from exc
+    return openpyxl
 
-    wb = Workbook()
+
+def write_excel(rows: list[ApiLoc], out_path: Path) -> None:
+    openpyxl = load_openpyxl()
+
+    wb = openpyxl.Workbook()
     detail = wb.active
-    detail.title = "API_LOC"
+    populate_detail_sheet(detail, "API_LOC", rows, "ApiLocTable")
+    populate_summary_sheet(wb.create_sheet("Summary"), rows)
+    style_workbook(wb)
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(out_path)
+
+
+def write_comparison_excel(
+    rows1: list[ApiLoc],
+    rows2: list[ApiLoc],
+    root1: Path,
+    root2: Path,
+    out_path: Path,
+) -> None:
+    openpyxl = load_openpyxl()
+
+    wb = openpyxl.Workbook()
+    populate_detail_sheet(wb.active, "Workspace1_API_LOC", rows1, "Workspace1ApiLocTable")
+    populate_summary_sheet(wb.create_sheet("Workspace1_Summary"), rows1)
+    populate_detail_sheet(wb.create_sheet("Workspace2_API_LOC"), "Workspace2_API_LOC", rows2, "Workspace2ApiLocTable")
+    populate_summary_sheet(wb.create_sheet("Workspace2_Summary"), rows2)
+    populate_comparison_sheet(wb.create_sheet("Comparison"), rows1, rows2, root1, root2)
+    style_workbook(wb)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(out_path)
+
+
+def populate_detail_sheet(sheet, title: str, rows: list[ApiLoc], table_name: str) -> None:
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+
+    sheet.title = title
     headers = ["Module Name", "Area", "File Name", "API Name", "Start Line", "End Line", "LOC"]
-    detail.append(headers)
+    sheet.append(headers)
     for row in rows:
-        detail.append([row.module, row.area, row.file, row.api, row.start_line, row.end_line, row.loc])
+        sheet.append([row.module, row.area, row.file, row.api, row.start_line, row.end_line, row.loc])
 
-    style_header_row(detail)
-    detail.freeze_panes = "A2"
-    detail.auto_filter.ref = detail.dimensions
-    set_widths(detail, [22, 10, 55, 35, 12, 12, 10])
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    set_widths(sheet, [22, 10, 55, 35, 12, 12, 10])
 
-    if detail.max_row > 1:
-        table = Table(displayName="ApiLocTable", ref=f"A1:G{detail.max_row}")
+    if sheet.max_row > 1:
+        table = Table(displayName=table_name, ref=f"A1:G{sheet.max_row}")
         table.tableStyleInfo = TableStyleInfo(
             name="TableStyleMedium2",
             showFirstColumn=False,
@@ -383,10 +425,11 @@ def write_excel(rows: list[ApiLoc], out_path: Path) -> None:
             showRowStripes=True,
             showColumnStripes=False,
         )
-        detail.add_table(table)
+        sheet.add_table(table)
 
-    summary = wb.create_sheet("Summary")
-    summary.append(["Module Name", "Files", "APIs", "Total LOC", "Average LOC/API", "Max LOC/API"])
+
+def populate_summary_sheet(sheet, rows: list[ApiLoc]) -> None:
+    sheet.append(["Module Name", "Files", "APIs", "Total LOC", "Average LOC/API", "Max LOC/API"])
 
     module_files: dict[str, set[str]] = defaultdict(set)
     module_locs: dict[str, list[int]] = defaultdict(list)
@@ -396,7 +439,7 @@ def write_excel(rows: list[ApiLoc], out_path: Path) -> None:
 
     for module in sorted(module_locs):
         locs = module_locs[module]
-        summary.append(
+        sheet.append(
             [
                 module,
                 len(module_files[module]),
@@ -409,8 +452,8 @@ def write_excel(rows: list[ApiLoc], out_path: Path) -> None:
 
     total_apis = len(rows)
     total_loc = sum(row.loc for row in rows)
-    summary.append([])
-    summary.append(
+    sheet.append([])
+    sheet.append(
         [
             "Grand Total",
             len({row.file for row in rows}),
@@ -421,24 +464,196 @@ def write_excel(rows: list[ApiLoc], out_path: Path) -> None:
         ]
     )
 
-    style_header_row(summary)
-    summary.freeze_panes = "A2"
-    set_widths(summary, [22, 12, 12, 14, 18, 16])
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    set_widths(sheet, [22, 12, 12, 14, 18, 16])
 
-    for sheet in (detail, summary):
+
+def module_totals(rows: list[ApiLoc]) -> dict[str, ScopeTotals]:
+    grouped: dict[str, list[ApiLoc]] = defaultdict(list)
+    for row in rows:
+        grouped[row.module].append(row)
+    return {
+        module: ScopeTotals(
+            files=len({row.file for row in items}),
+            apis=len(items),
+            loc=sum(row.loc for row in items),
+        )
+        for module, items in grouped.items()
+    }
+
+
+def file_totals(rows: list[ApiLoc]) -> dict[tuple[str, str], ScopeTotals]:
+    grouped: dict[tuple[str, str], list[ApiLoc]] = defaultdict(list)
+    for row in rows:
+        grouped[(row.module, row.file)].append(row)
+    return {
+        key: ScopeTotals(
+            files=1,
+            apis=len(items),
+            loc=sum(row.loc for row in items),
+        )
+        for key, items in grouped.items()
+    }
+
+
+def api_map(rows: list[ApiLoc]) -> dict[tuple[str, str, str], ApiLoc]:
+    result: dict[tuple[str, str, str], ApiLoc] = {}
+    duplicates: dict[tuple[str, str, str], int] = defaultdict(int)
+
+    for row in rows:
+        key = (row.module, row.file, row.api)
+        duplicates[key] += 1
+        if duplicates[key] == 1:
+            result[key] = row
+        else:
+            # Keep overloaded/repeated names visible instead of overwriting them.
+            result[(row.module, row.file, f"{row.api}#{duplicates[key]}")] = row
+
+    return result
+
+
+def compare_status(present1: bool, present2: bool, loc1: int | None, loc2: int | None, unit: str) -> str:
+    if present1 and not present2:
+        return f"Missing {unit} in Workspace 2"
+    if present2 and not present1:
+        return f"New {unit} in Workspace 2"
+    if loc1 != loc2:
+        return "LOC Changed"
+    return "Unchanged"
+
+
+def populate_comparison_sheet(
+    sheet,
+    rows1: list[ApiLoc],
+    rows2: list[ApiLoc],
+    root1: Path,
+    root2: Path,
+) -> None:
+    headers = [
+        "Level",
+        "Status",
+        "Module Name",
+        "File Name",
+        "API Name",
+        "Workspace 1 LOC",
+        "Workspace 2 LOC",
+        "LOC Delta",
+        "Workspace 1 Files",
+        "Workspace 2 Files",
+        "Workspace 1 APIs",
+        "Workspace 2 APIs",
+        "Workspace 1 Start Line",
+        "Workspace 2 Start Line",
+        "Workspace 1 Root",
+        "Workspace 2 Root",
+    ]
+    sheet.append(headers)
+
+    totals1 = module_totals(rows1)
+    totals2 = module_totals(rows2)
+    for module in sorted(set(totals1) | set(totals2)):
+        left = totals1.get(module)
+        right = totals2.get(module)
+        status = compare_status(left is not None, right is not None, left.loc if left else None, right.loc if right else None, "Module")
+        sheet.append(
+            [
+                "Module",
+                status,
+                module,
+                "",
+                "",
+                left.loc if left else "",
+                right.loc if right else "",
+                loc_delta(left.loc if left else None, right.loc if right else None),
+                left.files if left else "",
+                right.files if right else "",
+                left.apis if left else "",
+                right.apis if right else "",
+                "",
+                "",
+                str(root1),
+                str(root2),
+            ]
+        )
+
+    files1 = file_totals(rows1)
+    files2 = file_totals(rows2)
+    for module, file_name in sorted(set(files1) | set(files2)):
+        left = files1.get((module, file_name))
+        right = files2.get((module, file_name))
+        status = compare_status(left is not None, right is not None, left.loc if left else None, right.loc if right else None, "File")
+        sheet.append(
+            [
+                "File",
+                status,
+                module,
+                file_name,
+                "",
+                left.loc if left else "",
+                right.loc if right else "",
+                loc_delta(left.loc if left else None, right.loc if right else None),
+                left.files if left else "",
+                right.files if right else "",
+                left.apis if left else "",
+                right.apis if right else "",
+                "",
+                "",
+                str(root1),
+                str(root2),
+            ]
+        )
+
+    apis1 = api_map(rows1)
+    apis2 = api_map(rows2)
+    for module, file_name, api_name in sorted(set(apis1) | set(apis2)):
+        left = apis1.get((module, file_name, api_name))
+        right = apis2.get((module, file_name, api_name))
+        status = compare_status(left is not None, right is not None, left.loc if left else None, right.loc if right else None, "API")
+        sheet.append(
+            [
+                "API",
+                status,
+                module,
+                file_name,
+                api_name,
+                left.loc if left else "",
+                right.loc if right else "",
+                loc_delta(left.loc if left else None, right.loc if right else None),
+                "",
+                "",
+                "",
+                "",
+                left.start_line if left else "",
+                right.start_line if right else "",
+                str(root1),
+                str(root2),
+            ]
+        )
+
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    set_widths(sheet, [12, 30, 22, 55, 35, 16, 16, 12, 18, 18, 18, 18, 20, 20, 45, 45])
+
+
+def loc_delta(loc1: int | None, loc2: int | None) -> int | str:
+    if loc1 is None or loc2 is None:
+        return ""
+    return loc2 - loc1
+
+
+def style_workbook(wb) -> None:
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    for sheet in wb.worksheets:
         for row in sheet.iter_rows():
             for cell in row:
                 cell.alignment = Alignment(vertical="top")
 
-    # Reapply stronger formatting after global alignment.
-    for sheet in (detail, summary):
         for cell in sheet[1]:
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill("solid", fgColor="1F4E78")
             cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(out_path)
 
 
 def style_header_row(sheet) -> None:
@@ -456,7 +671,21 @@ def set_widths(sheet, widths: list[int]) -> None:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate C/C++ API LOC Excel report.")
-    parser.add_argument("--root", default=".", help="Project root containing module folders.")
+    parser.add_argument("--root", default=".", help="Project root containing module folders. Used for single-workspace mode.")
+    parser.add_argument(
+        "--root1",
+        "--old",
+        "--workspace1",
+        dest="root1",
+        help="First workspace root for comparison mode.",
+    )
+    parser.add_argument(
+        "--root2",
+        "--new",
+        "--workspace2",
+        dest="root2",
+        help="Second workspace root for comparison mode.",
+    )
     parser.add_argument(
         "--out",
         default=DEFAULT_REPORT_NAME,
@@ -482,13 +711,39 @@ def resolve_output_path(out_arg: str) -> Path:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    root = Path(args.root).resolve()
     out_path = resolve_output_path(args.out)
 
+    comparison_mode = args.root1 is not None or args.root2 is not None
+
+    if comparison_mode:
+        if not args.root1 or not args.root2:
+            print("Comparison mode requires both --root1 and --root2.", file=sys.stderr)
+            return 2
+
+        root1 = Path(args.root1).resolve()
+        root2 = Path(args.root2).resolve()
+        if not root1.exists():
+            print(f"Workspace 1 root path does not exist: {root1}", file=sys.stderr)
+            return 2
+        if not root2.exists():
+            print(f"Workspace 2 root path does not exist: {root2}", file=sys.stderr)
+            return 2
+
+        rows1 = collect_api_locs(root1)
+        rows2 = collect_api_locs(root2)
+        write_comparison_excel(rows1, rows2, root1, root2, out_path)
+
+        print(f"Scanned workspace 1: {root1}")
+        print(f"Workspace 1 APIs found: {len(rows1)}")
+        print(f"Scanned workspace 2: {root2}")
+        print(f"Workspace 2 APIs found: {len(rows2)}")
+        print(f"Excel comparison report: {out_path}")
+        return 0
+
+    root = Path(args.root).resolve()
     if not root.exists():
         print(f"Root path does not exist: {root}", file=sys.stderr)
         return 2
-
     rows = collect_api_locs(root)
     write_excel(rows, out_path)
 
