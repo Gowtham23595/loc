@@ -18,6 +18,8 @@ Usage:
 
     python api_loc_report.py --root1 old_workspace --root2 new_workspace --out api_loc_comparison.xlsx
 
+    python api_loc_report.py --root1 old_workspace --root2 new_workspace --exclude-dir visualisation --out api_loc_comparison.xlsx
+
 Install dependency if needed:
 
     python -m pip install openpyxl
@@ -344,7 +346,20 @@ def discover_module_roots(root: Path) -> list[tuple[str, Path]]:
     return modules
 
 
-def collect_api_locs(root: Path) -> list[ApiLoc]:
+def is_excluded_path(path: Path, scan_root: Path, exclude_dirs: set[str]) -> bool:
+    if not exclude_dirs:
+        return False
+
+    try:
+        relative_parts = path.relative_to(scan_root).parts
+    except ValueError:
+        relative_parts = path.parts
+
+    return any(part.lower() in exclude_dirs for part in relative_parts)
+
+
+def collect_api_locs(root: Path, exclude_dirs: set[str] | None = None) -> list[ApiLoc]:
+    exclude_dirs = exclude_dirs or set()
     rows: list[ApiLoc] = []
     for module_name, module_path in discover_module_roots(root):
         for area in MODULE_DIRS:
@@ -352,6 +367,8 @@ def collect_api_locs(root: Path) -> list[ApiLoc]:
             if not area_path.is_dir():
                 continue
             for path in sorted(area_path.rglob("*")):
+                if is_excluded_path(path, area_path, exclude_dirs):
+                    continue
                 if path.is_file() and path.suffix.lower() in SOURCE_EXTENSIONS:
                     rows.extend(parse_apis_in_file(module_name, area, root, path))
 
@@ -691,7 +708,27 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=DEFAULT_REPORT_NAME,
         help="Output .xlsx path. If an existing folder is provided, api_loc_report.xlsx is created inside it.",
     )
+    parser.add_argument(
+        "--exclude-dir",
+        action="append",
+        default=[],
+        help=(
+            "Folder name to exclude anywhere below src/inc/include. "
+            "Can be repeated or comma-separated, for example: "
+            "--exclude-dir visualisation --exclude-dir generated,temp"
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def parse_exclude_dirs(values: list[str]) -> set[str]:
+    exclude_dirs: set[str] = set()
+    for value in values:
+        for item in value.split(","):
+            name = item.strip().strip("/\\")
+            if name:
+                exclude_dirs.add(name.lower())
+    return exclude_dirs
 
 
 def resolve_output_path(out_arg: str) -> Path:
@@ -712,6 +749,7 @@ def resolve_output_path(out_arg: str) -> Path:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     out_path = resolve_output_path(args.out)
+    exclude_dirs = parse_exclude_dirs(args.exclude_dir)
 
     comparison_mode = args.root1 is not None or args.root2 is not None
 
@@ -729,14 +767,16 @@ def main(argv: list[str]) -> int:
             print(f"Workspace 2 root path does not exist: {root2}", file=sys.stderr)
             return 2
 
-        rows1 = collect_api_locs(root1)
-        rows2 = collect_api_locs(root2)
+        rows1 = collect_api_locs(root1, exclude_dirs)
+        rows2 = collect_api_locs(root2, exclude_dirs)
         write_comparison_excel(rows1, rows2, root1, root2, out_path)
 
         print(f"Scanned workspace 1: {root1}")
         print(f"Workspace 1 APIs found: {len(rows1)}")
         print(f"Scanned workspace 2: {root2}")
         print(f"Workspace 2 APIs found: {len(rows2)}")
+        if exclude_dirs:
+            print(f"Excluded folders: {', '.join(sorted(exclude_dirs))}")
         print(f"Excel comparison report: {out_path}")
         return 0
 
@@ -744,11 +784,13 @@ def main(argv: list[str]) -> int:
     if not root.exists():
         print(f"Root path does not exist: {root}", file=sys.stderr)
         return 2
-    rows = collect_api_locs(root)
+    rows = collect_api_locs(root, exclude_dirs)
     write_excel(rows, out_path)
 
     print(f"Scanned root: {root}")
     print(f"APIs found: {len(rows)}")
+    if exclude_dirs:
+        print(f"Excluded folders: {', '.join(sorted(exclude_dirs))}")
     print(f"Excel report: {out_path}")
     return 0
 
