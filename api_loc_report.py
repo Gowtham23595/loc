@@ -38,7 +38,7 @@ from pathlib import Path
 
 
 SOURCE_EXTENSIONS = {".c", ".cpp", ".h", ".hpp"}
-MODULE_DIRS = ("src", "inc")
+MODULE_DIRS = ("src", "inc", "include")
 DEFAULT_REPORT_NAME = "api_loc_report.xlsx"
 
 CONTROL_KEYWORDS = {
